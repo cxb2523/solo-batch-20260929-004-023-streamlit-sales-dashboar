@@ -6,6 +6,22 @@ In this video, I will show you how to add a user authentication service (login f
 ## Video Tutorial
 [![YouTube Video](https://img.youtube.com/vi/JoFGrSRj4X4/0.jpg)](https://youtu.be/JoFGrSRj4X4)
 
+## Credentials
+
+All credential handling lives in `credentials.py`; both the login route in
+`app.py` and the generator use it, and paths are anchored to the project root
+(the launch working directory is irrelevant).
+
+- Generate the current file: `python generate_keys.py` -> `credentials.yaml`
+  (bcrypt hashes via `streamlit_authenticator.Hasher`, written atomically;
+  password changes are picked up without restarting the app).
+- Default logins: `pparker` / `abc123`, `rmiller` / `def456`.
+- The old flat `hashed_pw.pkl` still works when `credentials.yaml` is absent;
+  the login page shows a migration banner until the YAML file is created.
+- A present but unrecognisable file raises a `MigrationError`; the reason is
+  shown on the login page instead of falling back to empty/legacy credentials.
+- Verify everything with `python verify_auth.py`.
+
 ## Demo Website
 ⭐ https://userauth-dashboard.herokuapp.com/
 

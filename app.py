@@ -1,4 +1,4 @@
-import pickle
+import sys
 from pathlib import Path
 
 import pandas as pd  # pip install pandas openpyxl
@@ -6,34 +6,45 @@ import plotly.express as px  # pip install plotly-express
 import streamlit as st  # pip install streamlit
 import streamlit_authenticator as stauth  # pip install streamlit-authenticator
 
+import credentials
+
 
 # emojis: https://www.webfx.com/tools/emoji-cheat-sheet/
 st.set_page_config(page_title="Sales Dashboard", page_icon=":bar_chart:", layout="wide")
 
 
 # --- USER AUTHENTICATION ---
-names = ["Peter Parker", "Rebecca Miller"]
-usernames = ["pparker", "rmiller"]
+# Credentials come exclusively from the credentials service. It decides
+# whether the new YAML file or the legacy flat file backs the login and
+# raises MigrationError when neither is usable.
+try:
+    snapshot = credentials.load()
+except credentials.MigrationError as error:
+    st.error(f"Credential migration error: {error.reason}")
+    st.stop()
 
-# load hashed passwords
-file_path = Path(__file__).parent / "hashed_pw.pkl"
-with file_path.open("rb") as file:
-    hashed_passwords = pickle.load(file)
+if snapshot.state == credentials.LEGACY:
+    st.warning(credentials.LEGACY_BANNER)
 
-authenticator = stauth.Authenticate(names, usernames, hashed_passwords,
-    "sales_dashboard", "abcdef", cookie_expiry_days=30)
+authenticator = stauth.Authenticate(
+    snapshot.config,
+    "sales_dashboard",
+    "abcdef",
+    cookie_expiry_days=30,
+)
 
-name, authentication_status, username = authenticator.login("Login", "main")
+authenticator.login()
+name = st.session_state.get("name")
+username = st.session_state.get("username")
+authentication_status = st.session_state.get("authentication_status")
 
-if authentication_status == False:
+if authentication_status is False:
     st.error("Username/password is incorrect")
-
-if authentication_status == None:
+elif authentication_status is None:
     st.warning("Please enter your username and password")
-
-if authentication_status:
+else:
     # ---- READ EXCEL ----
-    @st.cache
+    @st.cache_data
     def get_data_from_excel():
         df = pd.read_excel(
             io="supermarkt_sales.xlsx",
@@ -147,3 +158,20 @@ if authentication_status:
                 </style>
                 """
     st.markdown(hide_st_style, unsafe_allow_html=True)
+
+
+def _launched_directly() -> bool:
+    """True for `python app.py`, False for `streamlit run` and AppTest."""
+    try:
+        return Path(sys.argv[0]).resolve() == Path(__file__).resolve()
+    except (OSError, ValueError):
+        return False
+
+
+if _launched_directly():
+    # Allow `python app.py` from any working directory. Credential paths are
+    # anchored to the project root inside credentials.py.
+    from streamlit.web import cli as stcli
+
+    sys.argv = ["streamlit", "run", str(Path(__file__).resolve())]
+    sys.exit(stcli.main())
