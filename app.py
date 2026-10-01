@@ -1,53 +1,127 @@
-import pickle
-from pathlib import Path
+"""Entry point for the sales dashboard.
 
-import pandas as pd  # pip install pandas openpyxl
-import plotly.express as px  # pip install plotly-express
-import streamlit as st  # pip install streamlit
-import streamlit_authenticator as stauth  # pip install streamlit-authenticator
+``python app.py`` launches Streamlit on this file. The page layer here only
+handles rendering and pass/fail presentation; every credential decision is
+delegated to the ``credentials`` service.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
 
 
-# emojis: https://www.webfx.com/tools/emoji-cheat-sheet/
-st.set_page_config(page_title="Sales Dashboard", page_icon=":bar_chart:", layout="wide")
+def _launch_streamlit() -> None:
+    """Re-exec this file under `streamlit run` when launched with python."""
+    # Running under the streamlit runtime (normal `streamlit run`, or the
+    # headless AppTest harness used by verify_auth.py) means the script body
+    # below must execute instead of relaunching a server.
+    try:
+        from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+        if get_script_run_ctx() is not None:
+            return
+    except Exception:
+        pass
+    if os.environ.get("_SALES_DASHBOARD_STREAMLIT") == "1":
+        return
+    os.environ["_SALES_DASHBOARD_STREAMLIT"] = "1"
+    import subprocess
+
+    port = os.environ.get("APP_PORT", "8501")
+    cmd = [
+        sys.executable,
+        "-m",
+        "streamlit",
+        "run",
+        os.path.join(str(os.path.dirname(os.path.abspath(__file__))), "app.py"),
+        "--server.port",
+        str(port),
+        "--server.headless",
+        "true",
+    ]
+    try:
+        sys.exit(subprocess.call(cmd))
+    except KeyboardInterrupt:
+        sys.exit(0)
 
 
-# --- USER AUTHENTICATION ---
-names = ["Peter Parker", "Rebecca Miller"]
-usernames = ["pparker", "rmiller"]
+if __name__ == "__main__":
+    _launch_streamlit()
 
-# load hashed passwords
-file_path = Path(__file__).parent / "hashed_pw.pkl"
-with file_path.open("rb") as file:
-    hashed_passwords = pickle.load(file)
 
-authenticator = stauth.Authenticate(names, usernames, hashed_passwords,
-    "sales_dashboard", "abcdef", cookie_expiry_days=30)
+# The code below is executed by the streamlit runtime on every rerun.
+import pandas as pd  # noqa: E402
+import plotly.express as px  # noqa: E402
+import streamlit as st  # noqa: E402
+import streamlit_authenticator as stauth  # noqa: E402
 
-name, authentication_status, username = authenticator.login("Login", "main")
+import credentials as cred  # noqa: E402
 
-if authentication_status == False:
-    st.error("Username/password is incorrect")
+st.set_page_config(
+    page_title="Sales Dashboard",
+    page_icon=":bar_chart:",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
-if authentication_status == None:
-    st.warning("Please enter your username and password")
 
-if authentication_status:
-    # ---- READ EXCEL ----
-    @st.cache
+# --- AUTHENTICATION (service layer decides, page only displays) -------------
+
+try:
+    credentials = cred.load()
+except cred.MigrationError as exc:
+    # Neither the new nested format nor the legacy flat list: show the
+    # concrete reason. Never fall back to empty/old credentials.
+    st.error(str(exc))
+    st.stop()
+
+names, usernames = credentials.names_and_usernames()
+authenticator = stauth.Authenticate(
+    credentials.mapping,
+    "sales_dashboard",
+    "abcdef",
+    cookie_expiry_days=30,
+    auto_hash=False,
+)
+
+
+def render_login() -> None:
+    """The /login page: legacy banner on top, then the authenticator form."""
+    if credentials.is_legacy:
+        st.warning(cred.LEGACY_BANNER)
+
+    # streamlit-authenticator 0.4.x renders the form itself and records the
+    # outcome in session_state; the old tuple is returned only for
+    # location='unrendered'.
+    authenticator.login(location="main", key="Login")
+    authentication_status = st.session_state.get("authentication_status")
+
+    if authentication_status is False:
+        st.error(cred.BAD_CREDENTIALS_MESSAGE)
+    elif authentication_status is None:
+        st.warning(cred.NO_INPUT_MESSAGE)
+
+
+def render_dashboard(name: str) -> None:
+    """Content shown only after a successful login."""
+
+    @st.cache_data
     def get_data_from_excel():
-        df = pd.read_excel(
-            io="supermarkt_sales.xlsx",
+        data_frame = pd.read_excel(
+            io=str(cred.PROJECT_ROOT / "supermarkt_sales.xlsx"),
             engine="openpyxl",
             sheet_name="Sales",
             skiprows=3,
             usecols="B:R",
             nrows=1000,
         )
-        # Add 'hour' column to dataframe
-        df["hour"] = pd.to_datetime(df["Time"], format="%H:%M:%S").dt.hour
-        return df
+        data_frame["hour"] = pd.to_datetime(
+            data_frame["Time"], format="%H:%M:%S"
+        ).dt.hour
+        return data_frame
 
-    df = get_data_from_excel()
+    data_frame = get_data_from_excel()
 
     # ---- SIDEBAR ----
     authenticator.logout("Logout", "sidebar")
@@ -55,31 +129,28 @@ if authentication_status:
     st.sidebar.header("Please Filter Here:")
     city = st.sidebar.multiselect(
         "Select the City:",
-        options=df["City"].unique(),
-        default=df["City"].unique()
+        options=data_frame["City"].unique(),
+        default=data_frame["City"].unique(),
     )
-
     customer_type = st.sidebar.multiselect(
         "Select the Customer Type:",
-        options=df["Customer_type"].unique(),
-        default=df["Customer_type"].unique(),
+        options=data_frame["Customer_type"].unique(),
+        default=data_frame["Customer_type"].unique(),
     )
-
     gender = st.sidebar.multiselect(
         "Select the Gender:",
-        options=df["Gender"].unique(),
-        default=df["Gender"].unique()
+        options=data_frame["Gender"].unique(),
+        default=data_frame["Gender"].unique(),
     )
 
-    df_selection = df.query(
-        "City == @city & Customer_type ==@customer_type & Gender == @gender"
+    df_selection = data_frame.query(
+        "City == @city & Customer_type == @customer_type & Gender == @gender"
     )
 
     # ---- MAINPAGE ----
     st.title(":bar_chart: Sales Dashboard")
     st.markdown("##")
 
-    # TOP KPI's
     total_sales = int(df_selection["Total"].sum())
     average_rating = round(df_selection["Rating"].mean(), 1)
     star_rating = ":star:" * int(round(average_rating, 0))
@@ -98,9 +169,10 @@ if authentication_status:
 
     st.markdown("""---""")
 
-    # SALES BY PRODUCT LINE [BAR CHART]
     sales_by_product_line = (
-        df_selection.groupby(by=["Product line"]).sum()[["Total"]].sort_values(by="Total")
+        df_selection.groupby(by=["Product line"])
+        .sum(numeric_only=True)[["Total"]]
+        .sort_values(by="Total")
     )
     fig_product_sales = px.bar(
         sales_by_product_line,
@@ -113,12 +185,14 @@ if authentication_status:
     )
     fig_product_sales.update_layout(
         plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=(dict(showgrid=False))
+        xaxis=dict(showgrid=False),
     )
 
-    # SALES BY HOUR [BAR CHART]
-    sales_by_hour = df_selection.groupby(by=["hour"]).sum()[["Total"]]
-    fig_hourly_sales = px.bar(
+    sales_by_hour = (
+        df_selection.groupby(by=["hour"])
+        .sum(numeric_only=True)[["Total"]]
+    )
+    fig_hourly = px.bar(
         sales_by_hour,
         x=sales_by_hour.index,
         y="Total",
@@ -126,19 +200,16 @@ if authentication_status:
         color_discrete_sequence=["#0083B8"] * len(sales_by_hour),
         template="plotly_white",
     )
-    fig_hourly_sales.update_layout(
+    fig_hourly.update_layout(
         xaxis=dict(tickmode="linear"),
         plot_bgcolor="rgba(0,0,0,0)",
-        yaxis=(dict(showgrid=False)),
+        yaxis=dict(showgrid=False),
     )
 
-
     left_column, right_column = st.columns(2)
-    left_column.plotly_chart(fig_hourly_sales, use_container_width=True)
+    left_column.plotly_chart(fig_hourly, use_container_width=True)
     right_column.plotly_chart(fig_product_sales, use_container_width=True)
 
-
-    # ---- HIDE STREAMLIT STYLE ----
     hide_st_style = """
                 <style>
                 #MainMenu {visibility: hidden;}
@@ -147,3 +218,19 @@ if authentication_status:
                 </style>
                 """
     st.markdown(hide_st_style, unsafe_allow_html=True)
+
+
+# --- ROUTE ------------------------------------------------------------------
+
+# Only /login and a hidden dashboard exist; the page layer never decides
+# credentials itself, it just shows what the service/authenticator returned.
+dashboard_page = st.Page(
+    render_dashboard, title="Dashboard", url_path="dashboard"
+)
+login_page = st.Page(render_login, title="Login", url_path="login", default=True)
+st.navigation([dashboard_page, login_page], position="hidden")
+
+if st.session_state.get("authentication_status"):
+    st.switch_page(dashboard_page)
+else:
+    render_login()
